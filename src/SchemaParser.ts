@@ -89,7 +89,7 @@ export type APIResponse<
   : never`
   }
 
-  private requestToType (pathSchema: Operation, method: string): NodeType {
+  private requestToType(pathSchema: Operation, method: string): NodeType {
     const type = new ObjectType()
     type.addProperty('method', new StringLiteralType(method), method === 'get')
 
@@ -202,6 +202,12 @@ export type APIResponse<
 
   private itemToNode (item: Schema): NodeType {
     try {
+      const infos = {
+        format: 'format' in item ? item.format : undefined,
+        example: 'example' in item ? item.example : undefined,
+        description: 'description' in item ? item.description : undefined
+      }
+
       if (Array.isArray(item)) {
         return new UnionType(
           item.map(v => this.itemToNode(v))
@@ -209,13 +215,7 @@ export type APIResponse<
       }
 
       if ('type' in item && Array.isArray(item.type)) {
-        throw new Error(`Can't convert item to NodeType : ${JSON.stringify(item.type)}`)
-      }
-
-      const infos = {
-        format: 'format' in item ? item.format : undefined,
-        example: 'example' in item ? item.example : undefined,
-        description: 'description' in item ? item.description : undefined
+        return new UnionType(item.type.map(v => this.itemTypeToNodeType(v, item))).with(infos);
       }
 
       if ('nullable' in item && item.nullable) {
@@ -287,30 +287,7 @@ export type APIResponse<
         return type
       }
 
-      if (['string'].includes(item.type)) {
-        if (item.enum) {
-          return new EnumType(item.enum).with(infos)
-        }
-        return new SimpleType('string').with(infos)
-      }
-
-      if (['array'].includes(item.type)) {
-        if (!('items' in item) || !item.items) {
-          return new ArrayType(new SimpleType('unknown')).with(infos);
-        }
-        return new ArrayType(this.itemToNode(item.items)).with(infos)
-      }
-
-      if (['int', 'integer', 'number'].includes(item.type)) {
-        return new SimpleType('number').with(infos)
-      }
-
-      if (['boolean', 'bool'].includes(item.type)) {
-        return new SimpleType('boolean').with(infos)
-      }
-
-      console.error(item)
-      throw new Error(`Can't convert item to NodeType`)
+      return this.itemTypeToNodeType(item.type, item).with(infos)
     } catch (e) {
       console.error('VVVV From VVVV', )
       console.error(item)
@@ -318,4 +295,66 @@ export type APIResponse<
     }
   }
 
+  private itemTypeToNodeType(type: string, item: IJsonSchema): NodeType {    
+    if (!type) {
+      return new SimpleType('unknown')
+    }
+
+    if (['string'].includes(type)) {
+      if (item.enum) {
+        return new EnumType(item.enum)
+      }
+      return new SimpleType('string')
+    }
+
+    if (['array'].includes(type)) {
+      if (!('items' in item) || !item.items) {
+        return new ArrayType(new SimpleType('unknown'));
+      }
+      return new ArrayType(this.itemToNode(item.items))
+    }
+
+    if (['null'].includes(type)) {
+      return new SimpleType('null')
+    }
+
+    if (['int', 'integer', 'number'].includes(type)) {
+      return new SimpleType('number')
+    }
+
+    if (['boolean', 'bool'].includes(type)) {
+      return new SimpleType('boolean')
+    }
+
+    if (['object'].includes(type)) {
+      const oType = new ObjectType()
+      if (
+          ('properties' in item) ||
+          ('items' in item)
+      ) {
+        let properties = ('properties' in item) ? item.properties! : item.items!
+        for (const [propertyName, propertyItem] of Object.entries(properties)) {
+          oType.addProperty(
+              propertyName,
+              this.itemToNode(propertyItem),
+              !(item.required ?? []).includes(propertyName)
+          )
+        }
+      }
+      // We have additional properties (unnamed properties)
+      if ('additionalProperties' in item && item.additionalProperties) {
+        if (typeof item.additionalProperties === 'boolean') {
+          oType.addAdditionalProperties(new SimpleType('unknown'))
+        } else {
+          oType.addAdditionalProperties(
+              this.itemToNode(item.additionalProperties)
+          )
+        }
+      }
+      return oType
+    }
+
+    console.error(type, item)
+    throw new Error(`Can't convert item type to NodeType`)
+  }
 }

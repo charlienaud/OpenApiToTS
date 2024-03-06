@@ -34,3 +34,6 @@ test('it should work with unknown items type for array', () => {
 test('it should handle additional properties correctly', () => {
     return shouldMatchFiles('additionProperties')
 });
+test('it should handle nullable properties correctly', () => {
+    return shouldMatchFiles('nullableProperties')
+});
