@@ -35,6 +35,12 @@ export class SchemaParser {
       if (group === 'securitySchemes') {
         continue
       }
+
+      // We don't need APIParameters type as all the types are handled directly inside request query
+      if (group === 'parameters') {
+        continue
+      }
+
       const typeName = 'API' + capitalize(group)
       const components = new ObjectType()
       for (const [schemaName, componentSchema] of Object.entries(schemas)) {
@@ -49,11 +55,16 @@ export class SchemaParser {
       const apiEndpoint = new ObjectType()
       const responses = new ObjectType()
       const requests = new UnionType([])
+
       for (const [method, pathSchema] of Object.entries(methods ?? {})) {
+        if (method === 'parameters') {
+          continue
+        }
+
         if (typeof pathSchema === 'string' || Array.isArray(pathSchema)) {
           throw new Error(`Can't handle string ${pathSchema}`)
         }
-        requests.addSubtype(this.requestToType(pathSchema, method))
+        requests.addSubtype(this.requestToType(pathSchema, methods?.parameters, method))
         responses.addProperty(method, this.responseToType(pathSchema.responses))
       }
       apiEndpoint.addProperty('responses', responses)
@@ -89,15 +100,25 @@ export type APIResponse<
   : never`
   }
 
-  private requestToType (pathSchema: Operation, method: string): NodeType {
+  private requestToType(pathSchema: Operation,  pathParameters: (OpenAPIV3_1.ReferenceObject | OpenAPIV3_1.ParameterObject)[] | undefined, method: string): NodeType {
     const type = new ObjectType()
     type.addProperty('method', new StringLiteralType(method), method === 'get')
 
-    if (pathSchema.parameters) {
-      const params = pathSchema.parameters.map(v => this.resolveRefs(v))
-      this.addParamsToType(type, params, 'query', 'query')
-      this.addParamsToType(type, params, 'path', 'urlParams')
-    }
+    // Merge both path level params and operation level params
+    const params = [
+      ...pathParameters ?? [],
+      ...pathSchema.parameters ?? [],
+    ].map(v => this.resolveRefs(v))
+
+    // Operation params overrides path params (@see https://spec.openapis.org/oas/v3.1.0.html#fixed-fields-6)
+    const alreadyExist = new Set<string>();
+    const deduplicatedParams = params.reverse().filter(item => {
+      const key = `${item.name}-${item.in}`;
+      return !alreadyExist.has(key) && alreadyExist.add(key);
+    }).reverse()
+
+    this.addParamsToType(type, deduplicatedParams, 'query', 'query')
+    this.addParamsToType(type, deduplicatedParams, 'path', 'urlParams')
 
     if ('requestBody' in pathSchema && pathSchema.requestBody) {
       const requestBody = this.resolveRefs(pathSchema.requestBody)
@@ -171,7 +192,7 @@ export type APIResponse<
       } else if ('content' in param && param.content) {
         subType.addProperty(param['name'], this.itemToNode(param.content), param['required'] !== true)
       } else if ('type' in param && param.type && typeof param.type === 'string') {
-        subType.addProperty(param['name'], this.itemToNode({type: param.type} satisfies Schema), param['required'] !== true)
+        subType.addProperty(param['name'], this.itemTypeToNodeType(param['type'], param), param['required'] !== true)
       } else {
         throw new Error(`Can't handle param ${JSON.stringify(param)}`)
       }
@@ -202,6 +223,12 @@ export type APIResponse<
 
   private itemToNode (item: Schema): NodeType {
     try {
+      const infos = {
+        format: 'format' in item ? item.format : undefined,
+        example: 'example' in item ? item.example : undefined,
+        description: 'description' in item ? item.description : undefined
+      }
+
       if (Array.isArray(item)) {
         return new UnionType(
           item.map(v => this.itemToNode(v))
@@ -210,12 +237,7 @@ export type APIResponse<
 
       if ('type' in item && Array.isArray(item.type)) {
         throw new Error(`Can't convert item to NodeType : ${JSON.stringify(item.type)}`)
-      }
-
-      const infos = {
-        format: 'format' in item ? item.format : undefined,
-        example: 'example' in item ? item.example : undefined,
-        description: 'description' in item ? item.description : undefined
+        // return new UnionType(item.type.map(v => this.itemTypeToNodeType(v, item))).with(infos);
       }
 
       if ('nullable' in item && item.nullable) {
@@ -287,30 +309,7 @@ export type APIResponse<
         return type
       }
 
-      if (['string'].includes(item.type)) {
-        if (item.enum) {
-          return new EnumType(item.enum).with(infos)
-        }
-        return new SimpleType('string').with(infos)
-      }
-
-      if (['array'].includes(item.type)) {
-        if (!('items' in item) || !item.items) {
-          return new ArrayType(new SimpleType('unknown')).with(infos);
-        }
-        return new ArrayType(this.itemToNode(item.items)).with(infos)
-      }
-
-      if (['int', 'integer', 'number'].includes(item.type)) {
-        return new SimpleType('number').with(infos)
-      }
-
-      if (['boolean', 'bool'].includes(item.type)) {
-        return new SimpleType('boolean').with(infos)
-      }
-
-      console.error(item)
-      throw new Error(`Can't convert item to NodeType`)
+      return this.itemTypeToNodeType(item.type, item).with(infos)
     } catch (e) {
       console.error('VVVV From VVVV', )
       console.error(item)
@@ -318,4 +317,65 @@ export type APIResponse<
     }
   }
 
+  private itemTypeToNodeType(type: string, item: IJsonSchema): NodeType {    
+    if (!type) {
+      return new SimpleType('unknown')
+    }
+
+    if (['string'].includes(type)) {
+      if (item.enum) {
+        return new EnumType(item.enum)
+      }
+      return new SimpleType('string')
+    }
+
+    if (['array'].includes(type)) {
+      if (!('items' in item) || !item.items) {
+        return new ArrayType(new SimpleType('unknown'));
+      }
+      return new ArrayType(this.itemToNode(item.items))
+    }
+
+    if (['null'].includes(type)) {
+      return new SimpleType('null')
+    }
+
+    if (['int', 'integer', 'number'].includes(type)) {
+      return new SimpleType('number')
+    }
+
+    if (['boolean', 'bool'].includes(type)) {
+      return new SimpleType('boolean')
+    }
+
+    if (['object'].includes(type)) {
+      const oType = new ObjectType()
+      if (
+          ('properties' in item) ||
+          ('items' in item)
+      ) {
+        let properties = ('properties' in item) ? item.properties! : item.items!
+        for (const [propertyName, propertyItem] of Object.entries(properties)) {
+          oType.addProperty(
+              propertyName,
+              this.itemToNode(propertyItem),
+              !(item.required ?? []).includes(propertyName)
+          )
+        }
+      }
+      // We have additional properties (unnamed properties)
+      if ('additionalProperties' in item && item.additionalProperties) {
+        if (typeof item.additionalProperties === 'boolean') {
+          oType.addAdditionalProperties(new SimpleType('unknown'))
+        } else {
+          oType.addAdditionalProperties(
+              this.itemToNode(item.additionalProperties)
+          )
+        }
+      }
+      return oType
+    }
+
+    throw new Error(`Can't convert item type to NodeType`)
+  }
 }

@@ -31,6 +31,9 @@ test('it should work with multipart/form-data request body', () => {
 test('it should work with unknown items type for array', () => {
     return shouldMatchFiles('unknown')
 });
+test('it should work with parameters at path level', () => {
+    return shouldMatchFiles('parametersAtPathLevel')
+});
 test('it should handle additional properties correctly', () => {
     return shouldMatchFiles('additionProperties')
 });
